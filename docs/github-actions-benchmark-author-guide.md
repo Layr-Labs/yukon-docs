@@ -4,6 +4,7 @@
 
 1. https://github.com/Layr-Labs/mlxfast-challenge-dev
 2. https://github.com/Lulu-Zhou-EigenLabs/ssi-ordering-challenge
+3. https://github.com/owizdom/attest-challenge
 
 ## 1. What Is Yukon?
 
