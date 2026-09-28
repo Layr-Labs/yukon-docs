@@ -3,7 +3,9 @@
 ## Examples
 
 1. https://github.com/Layr-Labs/mlxfast-challenge-dev
-2. https://github.com/Lulu-Zhou-EigenLabs/ssi-ordering-challenge
+2. https://github.com/Layr-Labs/eip8200-challenges
+3. https://github.com/Layr-Labs/mlxfast-bonsai2-27b-engine
+4. https://github.com/Lulu-Zhou-EigenLabs/ssi-ordering-challenge
 
 ## 1. What Is Yukon?
 
@@ -15,11 +17,11 @@ only submissions that improve the current best.
 For GitHub Actions benchmarks, your repository's workflow is the executor. Yukon owns
 orchestration, score comparison, editable-path enforcement, and promotion decisions.
 Yukon also provides the benchmark CLI and database-backed submission system for your
-benchmark. We will get the frontend built.
+benchmark.
 
 ## 2. `benchmark.json`
 
-Put `benchmark.json` at the benchmark root. For a repo-root benchmark, that is the
+Put `benchmark.json` at the benchmark root. For a repo-root benchmark, this is the
 repository root. For a leaf benchmark imported with `rootDir`, it is the leaf directory.
 
 Minimal GitHub Actions-routed manifest:
@@ -42,11 +44,56 @@ Minimal GitHub Actions-routed manifest:
 }
 ```
 
+Multi-track GitHub Actions manifest:
+
+```json
+{
+  "schemaVersion": 2,
+  "name": "example-suite",
+  "tracks": [
+    {
+      "name": "fast-path",
+      "description": "Optimize the fast-path implementation.",
+      "category": "go",
+      "direction": "+",
+      "editablePaths": ["tracks/fast-path/submission"],
+      "setupCommand": ["bash", "-lc", "./setup.sh fast-path"],
+      "benchmarkCommand": ["bash", "-lc", "./benchmark.sh fast-path"],
+      "scorePath": "benchmark-results/fast-path/score.json",
+      "runner": {
+        "provider": "github-actions",
+        "workflow": "benchmark-fast-path.yml"
+      }
+    },
+    {
+      "name": "small-path",
+      "description": "Optimize the small-path implementation.",
+      "category": "go",
+      "direction": "-",
+      "editablePaths": ["tracks/small-path/submission"],
+      "setupCommand": ["bash", "-lc", "./setup.sh small-path"],
+      "benchmarkCommand": ["bash", "-lc", "./benchmark.sh small-path"],
+      "scorePath": "benchmark-results/small-path/score.json",
+      "runner": {
+        "provider": "github-actions",
+        "workflow": "benchmark-small-path.yml"
+      }
+    }
+  ]
+}
+```
+
+Use schema v1 for one benchmark track. Use schema v2 when one repository hosts
+multiple independently scored tracks. In schema v2, each entry in `tracks` has the
+same core fields as a schema-v1 manifest, and each track must have its own
+non-overlapping editable surface and score path. Yukon can then validate, score,
+and promote a track without replacing sibling-track submissions.
+
 Schema:
 
 | Field | Required | Explanation |
 | --- | --- | --- |
-| `schemaVersion` | yes | Must be `1`. |
+| `schemaVersion` | yes | Use `1` for a single-track manifest or `2` for a multi-track manifest. |
 | `name` | yes | Short benchmark name. |
 | `description` | yes | Human-readable description of the task. |
 | `category` | yes | Grouping label shown in clients. |
@@ -57,6 +104,13 @@ Schema:
 | `scorePath` | yes | JSON score file path, relative to the benchmark root. Must not be inside `editablePaths`. |
 | `runner` | yes | Use `{ "provider": "github-actions", "workflow": "<file>.yml" }`. |
 | `minScoreImprovementBips` | optional | Minimum relative improvement in basis points. `100` means 1%. |
+| `tracks` | schema v2 | Array of track manifests. Only valid when `schemaVersion` is `2`. |
+| `maxSubmissionBytes` | optional | Per-track archive byte limit before a candidate is built. |
+| `optionalEditablePaths` | optional | Editable paths that may be absent from a submission archive. Use sparingly and document why absence is valid. |
+| `editableSurfaceByteBudget` | optional | Fine-grained byte budget for editable files, used by larger challenge repos to reject oversized submissions before measurement. |
+| `preSubmitCommand` | optional | Local/server preflight command that can fail a submission before the ranked benchmark is dispatched. |
+| `scoreArtifact` | optional | Artifact path template when the uploaded artifact layout is not just `scorePath`. Keep it aligned with the workflow upload step. |
+| `leaderboard` | optional | Leaderboard metadata, such as `{ "namespace": "<track-id>" }`, for public score grouping. |
 
 Path rules:
 
@@ -64,6 +118,8 @@ Path rules:
   or `submission\\x`.
 - `editablePaths` must not include `benchmark.json`, `.git`, duplicate paths, or
   overlapping paths like `["submission", "submission/src"]`.
+- In schema v2, sibling tracks should have disjoint `editablePaths` unless the tracks
+  are intentionally coupled and cannot be promoted independently.
 - `scorePath` must be outside `editablePaths`.
 - `runner.workflow` is only the filename inside `.github/workflows`, for example
   `"benchmark.yml"`, not `.github/workflows/benchmark.yml`.
@@ -127,6 +183,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Setup
         run: bash .yukon/setup.sh
@@ -142,6 +199,33 @@ jobs:
           path: .yukon/score.json
           if-no-files-found: error
 ```
+
+Workflow rules that matter in production:
+
+- Use `workflow_dispatch` as the submission entry point. Do not add `pull_request`,
+  `push`, or `schedule` triggers to a workflow that executes untrusted submissions.
+- Check out `${{ github.sha }}`. Do not check out a branch name that may move while a
+  run is queued.
+- Set `persist-credentials: false` unless a trusted step explicitly needs a checkout
+  token. Ranked workflows should usually need read-only `contents` permission.
+- Pin third-party actions by full commit SHA for self-hosted or secret-bearing jobs.
+  Version tags are acceptable for minimal public examples, but not for private or
+  high-value benchmark runners.
+- Treat `editablePaths` as untrusted input. If the workflow runs on self-hosted
+  hardware, add an early hosted job that lints the manifest and performs static review
+  or surface checks before the GPU/TEE/private runner is reached.
+- Re-verify the editable surface at runtime for `submissions/*` refs. The dispatched
+  candidate should differ from the trusted base only inside manifest-declared
+  editable paths.
+- Keep private prompts, goldens, baselines, calibration data, and runner credentials
+  outside the editable surface. Prefer content-addressed pins and fail closed when a
+  staged artifact is absent or hash-mismatched.
+- Upload the score only after validating its schema and artifact path. For private
+  benchmarks, redact failure details and deny-list prompt/golden/model artifacts before
+  uploading anything from a failed run.
+- Use concurrency deliberately. Hosted validation can cancel superseded runs; expensive
+  self-hosted measurements often should not be cancelled mid-window because that can
+  waste the runner slot and leave hardware in a bad state for the next run.
 
 Artifact conditions:
 
@@ -189,6 +273,10 @@ Yukon's GitHub Actions flow is PR-centric:
 7. If the submission improves, Yukon leaves the PR open for promotion.
 8. Promotion fast-forwards the default branch to the validated candidate commit. GitHub
    then marks the PR merged.
+
+For schema-v2 benchmarks, this flow applies per track. `yukon switch <track>` changes
+the local track selection without changing Git branches, `HEAD`, the index, or the
+worktree; `yukon tracks` lists the available track selections.
 
 The PR is the durable public record: diff, workflow run, score comment, and final
 closed/merged state live together.
